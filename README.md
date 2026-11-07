@@ -1,72 +1,154 @@
-# 中国全域可再生能源出力因子计算
+# China Renewable Profiles: Provincial Hourly Wind & Solar Capacity Factors
 
-## 项目简介
+**English** | [中文](README_zh.md)
 
-本项目利用 [Atlite](https://atlite.readthedocs.io/) 库，基于历史气象再分析数据计算了中国区域 2020 年的风电和光伏出力因子时间序列。出力因子反映了可再生能源在不弃电情况下的实际出力与装机容量之比。
-FAQ:
-F: 请教一下Github上传的中国可再生能源出力因子计算，目前是只有2020年的对吧？如果换成别的年份，按理说就需要找到该年的气象数据？
-A: 对，但是每年的气象差不多，只是装机不一样。所以如果要用2023年的出力，就可以用2023年的装机+2020年的标么值，这种做法被称为以2020气象年为基准年，是常见的做法。
+Ready-to-use **hourly capacity factors for solar PV, onshore wind and offshore wind in 31 Chinese provinces**,
+computed from ERA5 reanalysis (weather year 2020) with [Atlite](https://atlite.readthedocs.io/). Clone the repo
+and use the CSVs directly: no reanalysis download, no conda environment.
 
+The repo also contains scripts to regenerate the data or extract point-level profiles, plus a small MATLAB
+microgrid reliability model.
 
-## 数据来源
+---
 
-- 气象数据：ERA5 再分析数据
-- 空间分辨率：约 30km × 30km
-- 时间分辨率：小时级
-- 时间范围：2020 年全年
+## Contents
 
-## 使用方法
+| | What | Where | Needs |
+|---|---|---|---|
+| ① | **Provincial hourly capacity factors** (main dataset) | [`data/provincial/`](data/provincial/) | nothing (CSV) |
+| ② | City-level example: 16 cities in Anhui | [`data/resources/`](data/resources/) | nothing (CSV) |
+| ③ | Scripts to regenerate gridded data and extract any lat/lon | [`scripts/`](scripts/) | conda env + ERA5 download |
+| ④ | MATLAB microgrid reliability simulation (LOLP / EDNS) | [`simulation/`](simulation/) | MATLAB + YALMIP + CPLEX |
 
-### 1. 环境配置
+## Quick start
 
-（对于一般用户，可以从2开始，1是为了运行`scripts/build_renewable_profile.py`来生成全国出力因子数据，这一步我已经运行好了，生成的数据放在了云盘中）
+```python
+import pandas as pd
 
-使用 conda 创建并激活环境：
+solar  = pd.read_csv("data/provincial/solar_cf_2020.csv",  index_col=0, parse_dates=True)
+onwind = pd.read_csv("data/provincial/onwind_cf_2020.csv", index_col=0, parse_dates=True)
+
+# capacity factor × installed capacity (MW) = hourly output (MW)
+anhui_pv_MW = solar["Anhui"] * 40_000
+```
+
+See [`scripts/example_usage.py`](scripts/example_usage.py) for annual energy, daily profiles and monthly means.
+
+## The dataset
+
+| File | Content | Size |
+|---|---|---|
+| [`solar_cf_2020.csv`](data/provincial/solar_cf_2020.csv) | Solar PV | 8784 h × 31 provinces |
+| [`onwind_cf_2020.csv`](data/provincial/onwind_cf_2020.csv) | Onshore wind | 8784 h × 31 provinces |
+| [`offwind_cf_2020.csv`](data/provincial/offwind_cf_2020.csv) | Offshore wind | 8784 h × 11 coastal provinces |
+| [`provincial_cf_2020.nc`](data/provincial/provincial_cf_2020.nc) | All three in one NetCDF, with Chinese names | — |
+| [`provincial_summary_2020.csv`](data/provincial/provincial_summary_2020.csv) | Technical potential (MW), mean CF, full-load hours | 73 rows |
+
+- **Unit:** per-unit of installed capacity, 0–1.
+- **Time:** hourly, **Beijing time (UTC+8)**, 2020-01-01 00:00 to 2020-12-31 23:00 (leap year, 8784 h).
+- **Spatial:** each province is the capacity-weighted average over its land-eligible ERA5 cells (0.25°, ≈ 30 km).
+- **Technology:** crystalline-Si PV (35° tilt, south-facing), Vestas V112 3 MW onshore, NREL 5 MW offshore.
+
+Full method, parameters and verification: [`data/provincial/METADATA.md`](data/provincial/METADATA.md).
+
+### Before you use it
+
+- These are **resource profiles**, not observed generation: no curtailment, outages or grid limits.
+- **Onshore wind is low in many inland and mountainous provinces** (e.g. Shanxi, Gansu, Sichuan) compared with
+  reported 2020 utilization hours. Trust the hourly *shape* more than the *level*, and rescale to official
+  statistics if absolute energy matters.
+- Solar full-load hours (≈ 820–1720 h/yr) are in line with reported values.
+
+## FAQ
+
+**Only 2020? What about other years?**
+Weather varies relatively little from year to year; installed capacity is what changes. A common approach is to
+combine the target year's installed capacity with these 2020 per-unit profiles, treating 2020 as the reference
+weather year. Inter-annual weather variability is not captured.
+
+**The Tsinghua cloud link in the old README is dead.**
+Yes. The provincial data now lives in this repository. For gridded data (any lat/lon or city), regenerate it as
+described below.
+
+**Can I get city-level or point-level profiles?**
+Yes, via the gridded workflow below. Anhui's 16 prefecture-level cities are already included in
+`data/resources/anhui_{pv,wind}_factors_2020.csv`.
+
+## Advanced: gridded data and point extraction
+
+The gridded national files (`wind_factor-china-2020.nc`, `pv_factor-china-2020.nc`) are large and not
+version-controlled. To rebuild them:
 
 ```bash
 conda env create -f environment.yaml
 conda activate pypsa-china
 ```
 
-### 2. 数据准备
+> `environment.yaml` was exported on Windows. On macOS or Linux, install `atlite xarray pandas netcdf4` from
+> conda-forge instead.
 
-由于原始数据文件较大，需要从[清华云盘](https://cloud.tsinghua.edu.cn/d/2e4a39868ab34d418157/)下载数据文件，并放置到项目相应目录中。
+1. Configure the [Copernicus CDS API](https://cds.climate.copernicus.eu/how-to-api).
+2. Download ERA5 (`cutouts/China-2020.nc`, slow) and compute gridded capacity factors:
+   ```bash
+   python scripts/build_renewable_profile.py
+   ```
+3. Extract any locations (edit the lat/lon list in the script; Anhui cities are the example):
+   ```bash
+   python scripts/extract_renewable_factor.py
+   ```
 
-### 3. 运行脚本
+The provincial dataset is rebuilt from PyPSA-China-THU outputs with
+`python scripts/export_provincial_profiles.py --src <PyPSA-China-THU>/resources` and verified with
+`python scripts/check_provincial_profiles.py`.
 
-在项目主目录下依次运行以下脚本：
+> The gridded workflow uses a 45° PV tilt and no loss factor. The provincial dataset uses 35° and a 0.85 loss
+> factor, so the two are not identical.
 
-1. 生成全国出力因子数据：（这一步我已经运行好了，直接运行下面的脚本即可）
+## MATLAB microgrid reliability simulation
 
-```bash
-python scripts/build_renewable_profile.py
+[`simulation/`](simulation/) is a simplified, teaching-oriented model of a microgrid with wind, PV, a thermal
+unit and storage. For each Monte Carlo sample it:
+
+- draws one day of wind speed (Weibull, with speed-dependent turbine outages) and irradiance (Beta distribution,
+  sunny, cloudy or rainy weather types);
+- solves an economic dispatch at 15-min resolution (96 steps) as a mixed-integer QP;
+- records unserved energy, then reports **LOLP** and **EDNS** across increasing wind and PV penetration.
+
+Run `pre.m` (main loop), which calls `micro_grid.m` (one dispatch). Requires MATLAB,
+[YALMIP](https://yalmip.github.io/) and CPLEX (or switch the solver in `micro_grid.m`, e.g. to Gurobi).
+
+> Source comments are GBK-encoded and may look garbled on GitHub. Open them in MATLAB with Chinese locale or
+> convert with `iconv -f GBK -t UTF-8`.
+
+The model is not calibrated against real systems; for accurate resource estimates use the Atlite-based data above.
+
+## Repository layout
+
+```
+data/
+  provincial/        ← main dataset (CSV + NetCDF + METADATA + LICENSE)
+  resources/         Anhui city-level example
+scripts/
+  export_provincial_profiles.py   build data/provincial from PyPSA-China-THU
+  check_provincial_profiles.py    sanity checks
+  example_usage.py                how to use the data
+  build_renewable_profile.py      ERA5 → gridded CF (Atlite)
+  extract_renewable_factor.py     gridded CF → any lat/lon
+simulation/          MATLAB microgrid reliability model
+environment.yaml     conda environment (Windows export)
 ```
 
+## Citation & license
 
-2. 提取特定地点的出力因子数据（以安徽省为例）：
+If you use the data, please cite this repository and ERA5:
 
-```bash
-python scripts/extract_renewable_factor.py
-```
-对于其他地点，只要输入所需地点经纬度数据即可。
+- Ruike Lyu, *China Renewable Profiles*, https://github.com/ruikelyu/China-Renewable-Profiles
+- Hersbach, H. et al. (2020). The ERA5 global reanalysis. *QJRMS*, 146, 1999–2049. doi:10.1002/qj.3803
 
-## Simulation 模块说明
+Data in `data/provincial/` is licensed under [CC BY 4.0](data/provincial/LICENSE) and contains modified Copernicus
+Climate Change Service information.
 
-### 功能概述
+Related: [PyPSA-China-THU](https://github.com/ruikelyu/PyPSA-China-THU), a provincial PyPSA capacity-expansion model
+of China that uses these profiles.
 
-simulation 模块提供了一个简化的可再生能源出力模拟框架，用于复现基本的光伏和风电出力计算过程。
-
-### 注意事项
-
-1. 这是一个简化的模拟模型，主要用于教学和演示目的
-2. 实际的发电量还需要考虑多种因素，如：
-   - 光伏发电：阴影效应、灰尘遮挡、组件老化等
-   - 风力发电：尾流效应、空气密度变化、机组效率等
-3. 如需更精确的计算结果，建议使用完整的 Atlite 模型
-
-### 待改进事项
-
-1. 模型参数需要进一步标定和验证
-2. 需要添加更多实际运行条件的影响因素
-3. 代码结构和文档需要进一步完善
-
+Questions and data requests: please [open an issue](https://github.com/ruikelyu/China-Renewable-Profiles/issues).
